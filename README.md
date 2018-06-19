@@ -34,3 +34,6 @@
 	WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 	See the License for the specific language governing permissions and
 	limitations under the License.
+
+## By djp
+Use rsync -r -v -u ./* djp@10.20.39.133:/home/djp/gopt to sync with server
