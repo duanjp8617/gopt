@@ -33,38 +33,55 @@ int find_index_avx(uint64_t addr, uint64_t *table) {
 	return __builtin_ffs(_mm256_movemask_pd(cmp));
 }
 
-struct cuckoo_slot slot;
-uint64_t* slot_ptr = (uint64_t*)(&slot);
+struct cuckoo_slot slots[BATCH_SIZE];
+uint64_t* slot_ptrs[BATCH_SIZE];
 
 // batch_index must be declared outside process_batch
 int batch_index = 0;
 
 void process_batch(int *key_lo)
 {
-	foreach(batch_index, BATCH_SIZE) {
-		int bkt_1, bkt_2, slot_id, success = 0;
-		slot.key = key_lo[batch_index];
+	int slot_id, bkt_1[BATCH_SIZE], bkt_2[BATCH_SIZE];
+	int success[BATCH_SIZE] = {0};
 
-		bkt_1 = hash(slot.key) & NUM_BKT_;
-		slot_id = find_index_avx(*slot_ptr, (uint64_t*)(&ht_index[bkt_1]));
+	/** < Issue prefetch for the 1st bucket*/
+	for(batch_index = 0; batch_index < BATCH_SIZE; batch_index ++) {
+		slots[batch_index].key = key_lo[batch_index];
+
+		bkt_1[batch_index] = hash(key_lo[batch_index]) & NUM_BKT_;
+		__builtin_prefetch(&ht_index[bkt_1[batch_index]], 0, 0);
+	}
+
+
+	/** < Try the 1st bucket. If it fails, issue prefetch for bkt #2 */
+	for(batch_index = 0; batch_index < BATCH_SIZE; batch_index ++) {
+		slot_id = find_index_avx(*slot_ptrs[batch_index], (uint64_t*)(&ht_index[bkt_1[batch_index]]));
 		if(slot_id) {
-			sum += ht_index[bkt_1].slot[slot_id-1].value;
+			sum += ht_index[bkt_1[batch_index]].slot[slot_id-1].value;
 			succ_1 ++;
-			success = 1;
+			success[batch_index] = 1;
 		}
 
-		if(success == 0) {
-			bkt_2 = hash(bkt_1) & NUM_BKT_;
-			slot_id = find_index_avx(*slot_ptr, (uint64_t*)(&ht_index[bkt_2]));
+		if(success[batch_index] == 0) {
+			bkt_2[batch_index] = hash(bkt_1[batch_index]) & NUM_BKT_;
+			__builtin_prefetch(&ht_index[bkt_2[batch_index]], 0, 0);
+		}
+	}
+
+	/** < For failed batch elements, try the 2nd bucket */
+	for(batch_index = 0; batch_index < BATCH_SIZE; batch_index ++) {
+
+		if(success[batch_index] == 0) {
+			slot_id = find_index_avx(*slot_ptrs[batch_index], (uint64_t*)(&ht_index[bkt_2[batch_index]]));
 			if(slot_id) {
-				sum += ht_index[bkt_2].slot[slot_id-1].value;
+				sum += ht_index[bkt_2[batch_index]].slot[slot_id-1].value;
 				succ_2 ++;
-				success = 1;
+				success[batch_index] = 1;
 			}
-		}
 
-		if(success == 0) {
-			fail ++;
+			if(success[batch_index] == 0) {
+				fail ++;
+			}
 		}
 	}
 }
@@ -78,22 +95,11 @@ int main(int argc, char **argv)
 	long long ins;
 	int retval;
 
-#ifndef __AVX__
-	// Check whether we have AVX
-	assert(1==0);
-#endif
-
-	// A short piece of code for testing how we
-	// should set up the mask.
-	struct cuckoo_slot slot;
-	slot.key = 2312;
-	slot.value = 2342;
-	uint64_t* slot_ptr = (uint64_t*)(&slot);
-	struct cuckoo_slot slot_1;
-	slot_1.key = 2312;
-	slot_1.value = 231232;
-	uint64_t* slot_1_ptr = (uint64_t*)(&slot_1);
-	assert(((*slot_1_ptr)&0x00000000ffffFFFFull) == ((*slot_ptr)&0x00000000ffffFFFFull));
+	// Set up slot_ptrs
+	int i_;
+	for(i_=0; i_<BATCH_SIZE; i_++) {
+		slot_ptrs[i_] = (uint64_t*)(&slots[i_]);
+	}
 
 	red_printf("main: Initializing cuckoo hash table\n");
 	cuckoo_init(&keys, &ht_index);
